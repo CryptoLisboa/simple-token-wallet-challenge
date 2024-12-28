@@ -4,7 +4,7 @@ out = 'out'
 libs = ['lib']
 fs_permissions = [{ access = "read-write", path = "./"}]
 remappings = [
-  "@openzeppelin/=lib/openzeppelin-contracts/",
+  "openzeppelin-contracts/=lib/openzeppelin-contracts/",
   "forge-std/=lib/forge-std/src/"
 ]
 

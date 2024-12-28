@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity >=0.8.0 <0.9.0;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import "openzeppelin-contracts/contracts/security/ReentrancyGuard.sol";
 import "forge-std/console.sol";
 
 /**
  * @title Vault
  * @dev A smart contract that allows users to deposit and withdraw ERC20 tokens
  * Tracks balances per user and token, and includes basic security measures
+ * 
+ * IMPORTANT: Users must approve this contract to spend their tokens before depositing.
+ * Use checkAllowance() to verify approval status before attempting deposits.
  */
 contract Vault is ReentrancyGuard {
     // State Variables
@@ -39,6 +42,13 @@ contract Vault is ReentrancyGuard {
     event TokenUntracked(
         address indexed user,
         address indexed token
+    );
+
+    event InsufficientAllowance(
+        address indexed user,
+        address indexed token,
+        uint256 required,
+        uint256 actual
     );
 
     // Constructor
@@ -90,19 +100,106 @@ contract Vault is ReentrancyGuard {
     }
 
     /**
-     * @dev Deposits tokens into the vault
+     * @dev Checks if the contract has sufficient allowance to transfer tokens
+     * @param token The ERC20 token address to check
+     * @param amount The amount to check allowance for
+     * @return allowed Whether the contract has sufficient allowance
+     * @return currentAllowance The current allowance amount
+     */
+    function checkAllowance(
+        address token,
+        uint256 amount
+    ) public view returns (bool allowed, uint256 currentAllowance) {
+        IERC20 tokenContract = IERC20(token);
+        currentAllowance = tokenContract.allowance(msg.sender, address(this));
+        return (currentAllowance >= amount, currentAllowance);
+    }
+
+    /**
+     * @dev Deposits tokens into the vault with automatic approval if needed
      * @param token The ERC20 token address to deposit
      * @param amount The amount of tokens to deposit
+     * @param approveIfNeeded If true, will attempt to approve tokens if current allowance is insufficient
+     */
+    function depositWithPermit(
+        address token,
+        uint256 amount,
+        bool approveIfNeeded
+    ) external nonReentrant {
+        require(token != address(0), "Invalid token address");
+        require(amount > 0, "Amount must be greater than 0");
+        
+        IERC20 tokenContract = IERC20(token);
+        
+        // Check current allowance
+        uint256 currentAllowance = tokenContract.allowance(msg.sender, address(this));
+        
+        // If allowance is insufficient and approveIfNeeded is true, try to approve
+        if (currentAllowance < amount && approveIfNeeded) {
+            // Some tokens (like USDT) require setting allowance to 0 first
+            if (currentAllowance > 0) {
+                require(
+                    tokenContract.approve(address(this), 0),
+                    "Failed to reset approval"
+                );
+            }
+            require(
+                tokenContract.approve(address(this), amount),
+                "Failed to approve tokens"
+            );
+            currentAllowance = amount;
+        }
+
+        require(currentAllowance >= amount, "Insufficient allowance");
+        
+        // Attempt the transfer
+        bool success = tokenContract.transferFrom(msg.sender, address(this), amount);
+        if (!success) {
+            // If transfer failed, check if it was due to allowance
+            uint256 newAllowance = tokenContract.allowance(msg.sender, address(this));
+            if (newAllowance < amount) {
+                emit InsufficientAllowance(msg.sender, token, amount, newAllowance);
+                revert("Insufficient allowance");
+            }
+            revert("Transfer failed");
+        }
+        
+        _balances[token][msg.sender] += amount;
+        _trackUserToken(msg.sender, token);
+        
+        emit TokenDeposited(msg.sender, token, amount);
+    }
+
+    /**
+     * @dev Deposits tokens into the vault (requires prior approval)
+     * @param token The ERC20 token address to deposit
+     * @param amount The amount of tokens to deposit
+     * 
+     * Requirements:
+     * - User must have approved this contract to spend at least `amount` tokens
+     * - Use checkAllowance() to verify approval status or use depositWithPermit() instead
      */
     function deposit(address token, uint256 amount) external nonReentrant {
         require(token != address(0), "Invalid token address");
         require(amount > 0, "Amount must be greater than 0");
         
         IERC20 tokenContract = IERC20(token);
-        require(
-            tokenContract.transferFrom(msg.sender, address(this), amount),
-            "Transfer failed"
-        );
+        
+        // Check allowance before attempting transfer
+        uint256 currentAllowance = tokenContract.allowance(msg.sender, address(this));
+        require(currentAllowance >= amount, "Insufficient allowance. Use depositWithPermit() or approve() first");
+        
+        // Attempt the transfer
+        bool success = tokenContract.transferFrom(msg.sender, address(this), amount);
+        if (!success) {
+            // If transfer failed, check if it was due to allowance
+            uint256 newAllowance = tokenContract.allowance(msg.sender, address(this));
+            if (newAllowance < amount) {
+                emit InsufficientAllowance(msg.sender, token, amount, newAllowance);
+                revert("Insufficient allowance");
+            }
+            revert("Transfer failed");
+        }
         
         _balances[token][msg.sender] += amount;
         _trackUserToken(msg.sender, token);
